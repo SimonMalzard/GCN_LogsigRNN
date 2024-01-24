@@ -10,6 +10,7 @@ import shutil
 import inspect
 import argparse
 from collections import OrderedDict, defaultdict
+from yaml import Loader
 
 import torch
 import numpy as np
@@ -24,7 +25,7 @@ import torch.optim as optim
 from tqdm import tqdm
 from tensorboardX import SummaryWriter
 from torch.optim.lr_scheduler import MultiStepLR
-import apex
+#import apex
 
 from utils import count_params, import_class
 
@@ -762,7 +763,7 @@ def main():
     p = parser.parse_args()
     if p.config is not None:
         with open(p.config, 'r') as f:
-            default_arg = yaml.load(f)
+            default_arg = yaml.load(f, Loader=Loader)
         key = vars(p).keys()
         for k in default_arg.keys():
             if k not in key:
