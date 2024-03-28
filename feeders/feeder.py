@@ -14,7 +14,8 @@ class Feeder(Dataset):
     def __init__(self, data_path, label_path, length_path,
                  random_choose=False, random_shift=False, random_move=False,
                  window_size=-1, normalization=False, debug=False, use_mmap=True,
-                 robust_add=False, robust_drop=False, add_rate=0.0, drop_rate=0.0):
+                 robust_add=False, robust_drop=False, ucl_implementation=False, 
+                 frame_method=None, add_rate=0.0, drop_rate=0.0):
         """
         :param data_path:
         :param label_path:
@@ -41,6 +42,8 @@ class Feeder(Dataset):
         self.robust_drop = robust_drop
         self.add_rate = add_rate
         self.drop_rate = drop_rate
+        self.ucl_implementation = ucl_implementation
+        self.frame_method = frame_method
         self.load_data()
         if normalization:
             self.get_mean_map()
@@ -73,50 +76,182 @@ class Feeder(Dataset):
             self.length = self.length[0:100]
             self.sample_name = self.sample_name[0:100]
 
-        if self.robust_add == True and self.robust_drop == True:
+
+        #np.save('length_train.npy', self.length)
+        #sys.exit()
+        #print(self.length.shape)
+
+        if self.robust_add is True and self.robust_drop is True:
             raise ValueError('Test either add or drop!')
-        elif self.robust_add == True:
+        elif self.robust_add is True:
             print('start adding')
             N, C, T, V, M = self.data.shape
-            add_data = np.zeros((N, C, int(T* (1 + self.add_rate)), V, M))
-            for i in range(len(self.data)):
-                insert_len = int((1 + self.add_rate) * int(self.length[i].item()))
-                data_numpy = self.data[i][:,:int(self.length[i].item())].transpose(3, 1, 2, 0)
+
+            if self.ucl_implementation is True:
+
+                add_data = np.zeros((N, C, int(T* (1 + self.add_rate)), V, M))
+                for i in range(len(self.data)):
+                    insert_len = int((1 + self.add_rate) * int(self.length[i].item()))
+                    data_numpy = self.data[i][:,:int(self.length[i].item())].transpose(3, 1, 2, 0)
+                    data_rescaled = np.zeros((data_numpy.shape[0], insert_len, data_numpy.shape[2], data_numpy.shape[3]))
+
+                    for person_id in range(data_numpy.shape[0]):
+                        data_rescaled[person_id] = cv2.resize(data_numpy[person_id],
+                                                            (data_numpy.shape[2],
+                                                            insert_len),
+                                                            cv2.INTER_LINEAR)
+                    
+                    tmp_add = data_rescaled.transpose(3, 1, 2, 0)
+                    rest = int(T* (1 + self.add_rate)) - tmp_add.shape[1]
+                    num = int(np.ceil(rest / tmp_add.shape[1]))
+                    
+                    pad = np.concatenate([tmp_add
+                                        for _ in range(num + 1)], 1)[:, :int(T* (1 + self.add_rate))]
+                    add_data[i] = pad
+                    self.length[i] = int(self.length[i].item() * (1 + self.add_rate))
+                #print(self.length[0])
+                self.data = add_data
+            else:
+                print('New version')
+        elif self.robust_drop is True:
+            print('start dropping, drop rate is:', self.drop_rate)
+            #print(self.length.shape, type(self.length))
+            #np.save('length_pre_dropout_bs16.npy', self.length)
+
+            if self.ucl_implementation is True:
+                #torch.save(self.data[:32,0,:,0,0], 'data_pre_dropout_bs32.pt')
+                print('drop method is ucl_implementation')
+
+                for i in range(len(self.label)):
+                    drop_index = np.random.choice(range(1, int(self.length[i].item())), size=int(
+                        self.drop_rate * int(self.length[i].item())), replace=False)
+
+                    if self.length[i].item() <= 1:
+                        continue
+
+                    # self.data[i, :, drop_index] = self.data[i, :, drop_index-1]
+                    tmp_deleted = np.delete(self.data[i], drop_index, 1)[
+                        :, :int(self.length[i].item() * (1 - self.drop_rate))]
+                    try:
+                        rest = self.data.shape[2] - tmp_deleted.shape[1]
+                        num = int(np.ceil(rest / tmp_deleted.shape[1]))
+                        pad = np.concatenate([tmp_deleted
+                                            for _ in range(num + 1)], 1)[:, :self.data.shape[2]]
+                        self.data[i] = pad
+                        self.length[i] = int(self.length[i].item() * (1 - self.drop_rate))
+                    except:
+                        continue 
+
+            elif self.frame_method is None or self.frame_method not in ['delete', 'repeat_previous', 'repeat_next', 'interpolate', 'expected_ucl']:
+                raise ValueError('Please specify a frame method: delete, repeat_previous, repeat_next, interpolate')
+            else:
+                print('drop method is:', self.frame_method)
+                # options: 
+                # 1. Delete the frames
+                # 2. repeat the previous frame
+                # 3. interpolate between the previous and next frame(s)
+                # 4. repeat the next available frame
+                # 5. if sequence: repeat the previous and next frame, equally (i.e. meet in the middle)
+
+                if self.frame_method == 'delete':
+                    N, C, T, V, M = self.data.shape
+                    data = np.zeros((N, C, T, V, M))    
+                    for i in range(len(self.label)):
+                        drop_indices = np.random.choice(range(1, int(self.length[i].item())), 
+                                                    size=int(self.drop_rate * int(self.length[i].item())), replace=False)
+                        drop_indices = np.sort(drop_indices) # sort the drop index so we don't include data we intend to delete in the next step.
+                        if self.length[i].item() <= 1:
+                            continue
+
+                        trans_data = self.data[i,:,:int(self.length[i].item()),:,:]
+                        new_data = self.delete_frames(trans_data, drop_indices)
+                        data[i,:,:new_data.shape[1],:] = new_data
+                        self.length[i] = new_data.shape[1]
+                    
+                    self.data = data
                 
-                data_rescaled = np.zeros(
-                    (data_numpy.shape[0], insert_len, data_numpy.shape[2], data_numpy.shape[3]))
-                for person_id in range(data_numpy.shape[0]):
-                    data_rescaled[person_id] = cv2.resize(data_numpy[person_id],
-                                                          (data_numpy.shape[2],
-                                                           insert_len),
-                                                          cv2.INTER_LINEAR)
+                elif self.frame_method == 'repeat_previous':
+                    # repeat the previous frame
+                    sort = True
+                    self.repeat_previous_frame(sort)
+                       
+                elif self.frame_method == 'repeat_next':
+                    # repeat the next frame
+                    self.repeat_next_frame()
                 
-                tmp_add = data_rescaled.transpose(3, 1, 2, 0)
-                rest = int(T* (1 + self.add_rate)) - tmp_add.shape[1]
-                num = int(np.ceil(rest / tmp_add.shape[1]))
+                elif self.frame_method == 'interpolate':
+                    # interpolate between the previous and next frame
+                    self.interpolate_data()
                 
-                pad = np.concatenate([tmp_add
-                                      for _ in range(num + 1)], 1)[:, :int(T* (1 + self.add_rate))]
-                add_data[i] = pad
-                self.length[i] = int(self.length[i].item() * (1 + self.add_rate))
-            self.data = add_data
-            
-        elif self.robust_drop == True:
-            print('start dropping')
-            for i in range(len(self.label)):
-                drop_index = np.random.choice(range(1, int(self.length[i].item())), size=int(
-                    self.drop_rate * int(self.length[i].item())), replace=False)
-                # self.data[i, :, drop_index] = self.data[i, :, drop_index-1]
-                tmp_deleted = np.delete(self.data[i], drop_index, 1)[
-                    :, :int(self.length[i].item() * (1 - self.drop_rate))]
-                try:
-                    rest = self.data.shape[2] - tmp_deleted.shape[1]
-                    num = int(np.ceil(rest / tmp_deleted.shape[1]))
-                    pad = np.concatenate([tmp_deleted
-                                          for _ in range(num + 1)], 1)[:, :self.data.shape[2]]
-                    self.data[i] = pad
-                except:
+                elif self.frame_method == 'expected_ucl':
+                    sort = False
+                    self.repeat_previous_frame(sort)
+
+
+    def delete_frames(self, data, drop_index):
+        return np.delete(data, drop_index, 1)
+
+    def repeat_previous_frame(self, sort=True):
+
+        for i in range(len(self.label)):
+            if self.length[i].item() <= 1:
+                continue
+            drop_indices = np.random.choice(range(1, int(self.length[i].item())), 
+                                        size=int(self.drop_rate * int(self.length[i].item())), replace=False)
+            if sort is True:
+                drop_indices = np.sort(drop_indices) # sort the drop index so we don't include data we intend to delete in the next step.
+
+            for j in range(len(drop_indices)):
+                if drop_indices[j] != 1:
+                    self.data[i, :, drop_indices[j]] = self.data[i, :, drop_indices[j]-1] 
+                else:
                     continue
+                # else if the drop index is the first frame, we can't repeat the previous frame, so don't apply this special case.  
+
+    def repeat_next_frame(self):
+        for i in range(len(self.label)):
+            if self.length[i].item() <= 1:
+                continue
+            drop_indices = np.random.choice(range(1, int(self.length[i].item())), 
+                                        size=int(self.drop_rate * int(self.length[i].item())), replace=False)
+            drop_indices = np.sort(drop_indices) 
+            rev_drop_indices = drop_indices[::-1] # reverse the sorted drop indices so that we're not repeating a frame we intend to delete.
+
+            for j in range(len(rev_drop_indices)):
+                if rev_drop_indices[j] != self.data[i].shape[1]-1:
+                    self.data[i, :, rev_drop_indices[j]] = self.data[i, :, rev_drop_indices[j]+1]
+                # else if the drop index is the last frame, we can't repeat the next frame, so don't apply this special case.
+
+    def interpolate_data(self):  
+        # Are the indices consecutive? (group them in consecutive groups)
+        for i in range(len(self.label)):
+            if self.length[i].item() <= 1:
+                continue
+            drop_indices = np.random.choice(range(1, int(self.length[i].item())), 
+                                        size=int(self.drop_rate * int(self.length[i].item())), replace=False)
+            drop_indices = np.sort(drop_indices)
+            sub_arrays = np.split(drop_indices, np.flatnonzero(np.diff(drop_indices)!=1) + 1)
+            for sub_array in sub_arrays:
+                len_sub_array = len(sub_array)
+                if len_sub_array > 1:
+                    for j in range(len_sub_array):
+                        if sub_array[len_sub_array-1]+1 == self.data.shape[2]:
+                            end = self.data[i,:,sub_array[len_sub_array-1],:,:]
+                        else:
+                            end = self.data[i,:,sub_array[len_sub_array-1]+1,:,:]
+                        start = self.data[i,:,sub_array[0]-1,:,:]
+                        
+                        inc = (end-start) / (len_sub_array+1)
+                        self.data[i,:,sub_array[j],:,:] = inc * (j+1) + start
+                else:
+                    if len(sub_array) == 0:
+                        continue
+                    #print(len(sub_array), drop_indices.shape, self.length[i].item())
+                    #print(sub_array)
+                    #print(sub_arrays)
+                    #print(sub_array[0])
+                    #print(sub_array[0], sub_array)
+                    self.data[i,:,sub_array] = (self.data[i,:,sub_array[0]-1] + self.data[i,:,sub_array[0]+1]) / 2
 
     def get_mean_map(self):
         data = self.data

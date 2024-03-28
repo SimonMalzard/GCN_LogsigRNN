@@ -70,11 +70,16 @@ class Model(nn.Module):
         )
 
         self.fc = nn.Linear(c2, num_class)
+        #self.fc = nn.Linear(c1, num_class)
 
     def forward(self, x):
         N, C, T, V, M = x.shape
+        #print(T, x.shape)
 
-        x = x.permute(0, 4, 3, 1, 2).contiguous().view(N, M * V * C, T)
+        # permute changes the order of the dimensions of the tensor
+        # view changes the shape of the tensor
+        # contiguous, just makes the elements of x stored in memory be in the right order for pytorch after the operations. 
+        x = x.permute(0, 4, 3, 1, 2).contiguous().view(N, M * V * C, T) 
         x = self.data_bn(x)
         x = x.view(N * M, V, C, T).permute(0, 2, 3, 1).contiguous()
         # N,C,T,V
@@ -101,7 +106,7 @@ class Model(nn.Module):
         x, _ = self.lstm2(torch.cat([x_logsig, x_sp], axis=-1))
         x = nn.BatchNorm1d(self.n_segments2).to(x.device)(x)
         x = x.view(
-            N * M, V, self.n_segments2, self.c2).permute(0, 3, 2, 1).contiguous()
+           N * M, V, self.n_segments2, self.c2).permute(0, 3, 2, 1).contiguous()
         
         out = x
         out_channels = out.size(1)
